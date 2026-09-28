@@ -174,8 +174,10 @@
 }
 
 /* Enable smooth scroll for anchor links on doc pages too */
-html {
-  scroll-behavior: smooth;
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
 
 /* ------------------------------------------------------------------ */
