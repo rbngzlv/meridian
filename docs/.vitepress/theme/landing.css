@@ -63,7 +63,7 @@
     width: 100%;
     max-width: var(--max-width);
     margin: 0 auto;
-    padding: 0 24px;
+    padding-inline: 24px;
 }
 
 /* --- compass motif (reusable) --- */
@@ -134,7 +134,7 @@
     font-size: 13px;
     font-weight: 600;
     transition: background 0.2s, color 0.2s;
-    margin-left: auto;
+    margin-inline-start: auto;
     flex-shrink: 0;
 }
 .landing-root nav .cta-short {
@@ -148,7 +148,7 @@
 @media (max-width: 768px) {
     .landing-root .container {
         max-width: 100%;
-        padding: 0 16px;
+        padding-inline: 16px;
     }
     .landing-root nav.top {
         width: 100%;
@@ -701,8 +701,8 @@
 .landing-root .config-callouts li::before {
     content: "·";
     position: absolute;
-    left: 4px;
-    top: 6px;
+    inset-inline-start: 4px;
+    inset-block-start: 6px;
     color: var(--gold-500);
     font-size: 22px;
     line-height: 1.4;
@@ -839,7 +839,7 @@
     background: var(--navy-950);
     padding: 10px 14px;
     border-radius: 4px;
-    border-left: 2px solid var(--gold-500);
+    border-inline-start: 2px solid var(--gold-500);
     display: inline-block;
     max-width: 100%;
     overflow-x: auto;
@@ -882,8 +882,8 @@
     font-style: italic;
 }
 .landing-root .why-aside {
-    padding-left: 24px;
-    border-left: 1px solid rgba(232, 184, 70, 0.2);
+    padding-inline-start: 24px;
+    border-inline-start: 1px solid rgba(232, 184, 70, 0.2);
 }
 .landing-root .why-aside h3 {
     font-family: var(--mono);
@@ -972,13 +972,13 @@
 .landing-root table.compare th,
 .landing-root table.compare td {
     padding: 16px 20px;
-    text-align: left;
+    text-align: start;
     border-bottom: 1px solid rgba(232, 184, 70, 0.08);
-    border-right: 1px solid rgba(232, 184, 70, 0.08);
+    border-inline-end: 1px solid rgba(232, 184, 70, 0.08);
 }
 .landing-root table.compare th:last-child,
 .landing-root table.compare td:last-child {
-    border-right: 0;
+    border-inline-end: 0;
 }
 .landing-root table.compare tr:last-child td {
     border-bottom: 0;
@@ -1113,7 +1113,7 @@
 }
 .landing-root .faq-item .answer ul {
     margin: 0;
-    padding-left: 20px;
+    padding-inline-start: 20px;
     list-style: disc;
 }
 .landing-root .faq-item .answer li {
@@ -1214,8 +1214,7 @@
     font-size: 17px;
     margin-bottom: 36px;
     max-width: 520px;
-    margin-left: auto;
-    margin-right: auto;
+    margin-inline: auto;
 }
 
 /* --- footer --- */

@@ -257,7 +257,7 @@
 
 /* Blockquotes */
 .vp-doc blockquote {
-  border-left: 2px solid #E8B846;
+  border-inline-start: 2px solid #E8B846;
   background: rgba(232, 184, 70, 0.04);
   padding: 16px 20px;
   border-radius: 0 4px 4px 0;
@@ -440,7 +440,7 @@
 /* ------------------------------------------------------------------ */
 
 .VPSidebar {
-  border-right: 1px solid rgba(232, 184, 70, 0.08);
+  border-inline-end: 1px solid rgba(232, 184, 70, 0.08);
 }
 
 .VPSidebarItem .text {
