@@ -12,8 +12,14 @@ module Meridian
       CADDYFILE             = File.join(CONFIG_DIR, "Caddyfile")
       ADMIN_SOCKET          = File.join(CONFIG_DIR, "admin.sock")
       RELOAD_LOCK           = File.join(CONFIG_DIR, "reload.lock")
-      VERSION_CHECK         = "version=$(podman exec #{PROXY_NAME} caddy version) || exit; " \
-                              "printf '%s\\n' \"$version\" | awk -F. 'BEGIN { ok=0 } { gsub(/^v/, \"\", $1); ok=($1 > 2 || ($1 == 2 && ($2 > 11 || ($2 == 11 && $3 >= 2)))) } END { exit !ok }'"
+      SOCKET_DIRECTORY      = ".config/systemd/user"
+      PROXY_SOCKET          = "meridian-caddy.socket"
+      SOCKET_PATH           = File.join(SOCKET_DIRECTORY, PROXY_SOCKET)
+      # Caddy 2.11.6 fixes ACME challenges on activated sockets.
+      VERSION_PREDICATE = "printf '%s\\n' \"$version\" | awk -F. 'BEGIN { ok=0 } { gsub(/^v/, \"\", $1); ok=($1 > 2 || ($1 == 2 && ($2 > 11 || ($2 == 11 && $3 >= 6)))) } END { exit !ok }'"
+      VERSION_CHECK     = "version=$(podman exec #{PROXY_NAME} caddy version) || exit; #{VERSION_PREDICATE}"
+      IMAGE_CHECK       = "version=$(caddy version) || exit; #{VERSION_PREDICATE}"
+      VALIDATE          = "podman run --rm -v \"$HOME/#{CONFIG_DIR}:/config:ro\" \"$1\" caddy validate --config /config/Caddyfile --adapter caddyfile"
 
       RESOLVE_TIMEOUT   = 120
       RESOLVE_SUCCESSES =   3
@@ -32,6 +38,7 @@ module Meridian
 
       def setup : Nil
         proxy = @config.resolved_proxy
+        image = proxy.image || Defaults::PROXY_IMAGE
         hosts = web_hosts(SetupFailed)
         network_quadlet = @quadlet_generator.network_file
         proxy_network_quadlet = @quadlet_generator.proxy_network_file
@@ -43,23 +50,34 @@ module Meridian
 
         hosts.each do |host|
           log(host, "Ensuring Caddy directories exist")
-          run_ssh!(host, ["mkdir", "-p", Quadlet::DIRECTORY, ROUTES_DIR, Runtime::Paths::ASSETS_DIRECTORY])
+          run_ssh!(host, ["mkdir", "-p", Quadlet::DIRECTORY, SOCKET_DIRECTORY, ROUTES_DIR, Runtime::Paths::ASSETS_DIRECTORY])
           data_dir_command = "path=$1; case \"$path\" in %h*) path=$HOME${path#%h};; esac; mkdir -p -- \"$path\""
           run_ssh!(host, ["sh", "-lc", data_dir_command, "meridian", proxy.data_dir])
           run_ssh!(host, ["sh", "-lc", "command -v flock >/dev/null"])
+          log(host, "Checking Caddy image version")
+          compatible = run_ssh(host, ["podman", "run", "--rm", image, "sh", "-c", IMAGE_CHECK])
+          raise SetupFailed.new("#{host}: proxy.image must be Caddy 2.11.6 or newer for socket activation") unless compatible.exit_code.zero?
 
           log(host, "Uploading shared proxy network Quadlet")
           upload_ssh(host, proxy_network_path, proxy_network_quadlet)
           log(host, "Uploading Caddy configuration")
           upload_ssh(host, CADDYFILE, @quadlet_generator.proxy_caddyfile)
           ensure_initial_route(host, web_proxy)
-          log(host, "Uploading Caddy Quadlet")
+          valid = run_ssh(host, ["sh", "-lc", VALIDATE, "meridian", image])
+          unless valid.exit_code.zero?
+            raise SetupFailed.new("#{host}: Caddy rejected the configuration; remove route fragments in ~/#{ROUTES_DIR} written by older Meridian versions and rerun setup. #{valid.stderr.strip}")
+          end
+          log(host, "Uploading Caddy Quadlet and socket unit")
           upload_ssh(host, quadlet_path, proxy_quadlet)
+          upload_ssh(host, SOCKET_PATH, @quadlet_generator.proxy_socket_file)
 
           run_ssh!(host, ["systemctl", "--user", "daemon-reload"])
           ensure_shared_proxy_network(host)
-          log(host, "Restarting #{PROXY_SERVICE}")
-          run_ssh!(host, ["systemctl", "--user", "restart", PROXY_SERVICE])
+          log(host, "Restarting #{PROXY_SERVICE} (brief interruption for all proxied services)")
+          # Stop the old proxy before systemd binds its ports.
+          run_ssh!(host, ["systemctl", "--user", "stop", PROXY_SERVICE])
+          run_ssh!(host, ["systemctl", "--user", "enable", "--now", PROXY_SOCKET])
+          run_ssh!(host, ["systemctl", "--user", "start", PROXY_SERVICE])
           verify_caddy!(host)
 
           log(host, "Checking proxy reachability at #{proxy_url}")
@@ -82,10 +100,8 @@ module Meridian
         activate_route(host, @config.service, @quadlet_generator.proxy_maintenance_route(proxy), removed_target: old_target)
       end
 
-      # Assets are served by this proxy straight off its read-only /srv/assets
-      # mount, so there is no upstream to confirm after a reload: an SSH drop
-      # mid-reload surfaces as SwitchUncertain. Route activation is idempotent,
-      # so rerunning the deploy resolves it.
+      # Assets have no upstream to confirm after an SSH drop during reload.
+      # Rerunning the deploy resolves SwitchUncertain.
       def register_assets(host : String) : Nil
         raise RouteFailed.new("Missing assets configuration") unless @config.assets
         activate_route(host, "#{@config.service}-assets", @quadlet_generator.proxy_asset_route)
@@ -126,9 +142,10 @@ module Meridian
           end
 
           log(host, "Stopping #{PROXY_SERVICE}")
+          run_ssh!(host, ["systemctl", "--user", "disable", "--now", PROXY_SOCKET])
           run_ssh!(host, ["systemctl", "--user", "stop", PROXY_SERVICE])
           log(host, "Removing Caddy Quadlet")
-          run_ssh!(host, ["rm", "-f", quadlet_path])
+          run_ssh!(host, ["rm", "-f", quadlet_path, SOCKET_PATH])
           run_ssh!(host, ["systemctl", "--user", "daemon-reload"])
         end
       rescue ex : SSH::CommandFailed | SSH::ConnectionError | ArgumentError | RouteFailed

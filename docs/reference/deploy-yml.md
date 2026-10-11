@@ -20,7 +20,7 @@ the resolved deploy intent without SSH or registry access.
 | `image` | `String` | Required | `ghcr.io/acme/my-app:latest` | Used by every role unless `servers.<role>.image` overrides it. |
 | `build` | `BuildConfig` | Optional, but unsupported | See [build](#build) | Any present `build:` block fails with `Config key build is not yet supported`. |
 | `servers` | map of role name to `ServerConfig` | Required, non-empty | `web: { hosts: [...] }` | Must define a `web` role; other role names are user-defined. `assets:` requires `servers.web.proxy`. |
-| `proxy` | `ProxyConfig` | Optional | `image: docker.io/library/caddy:2.11.4-alpine` | Configures the shared host-level Caddy service used by proxied roles. |
+| `proxy` | `ProxyConfig` | Optional | `image: docker.io/library/caddy:2.11.7-alpine` | Configures the shared host-level Caddy service used by proxied roles. |
 | `registry` | `RegistryConfig` | Optional | `server: ghcr.io` | Used before registry pulls when credentials are configured. |
 | `env` | `EnvConfig` | Optional | `clear: { MARTEN_ENV: production }` | Applied to app containers and one-off run containers. |
 | `ssh` | `SSHConfig` | Optional, default object | `user: deploy` | Controls SSH arguments for remote commands and transfers. |
@@ -213,7 +213,7 @@ deploys and route registration.
 
 ```yaml
 proxy:
-  image: docker.io/library/caddy:2.11.4-alpine
+  image: docker.io/library/caddy:2.11.7-alpine
   http_port: 80
   https_port: 443
   data_dir: "%h/.local/share/meridian-caddy"
@@ -222,7 +222,7 @@ proxy:
 
 | Key | Type | Required / default | Example | Rules |
 | --- | --- | --- | --- | --- |
-| `image` | `String` | Optional, runtime default `docker.io/library/caddy:2.11.4-alpine` | `docker.io/library/caddy:2.11.4-alpine` | Must contain Caddy 2.11.2 or newer. |
+| `image` | `String` | Optional, runtime default `docker.io/library/caddy:2.11.7-alpine` | `docker.io/library/caddy:2.11.7-alpine` | Must contain Caddy 2.11.6 or newer. |
 | `http_port` | `Int32` | Optional, default `80` | `80` | Positive host port; rootless low-port binding must be enabled. |
 | `https_port` | `Int32` | Optional, default `443` | `443` | Positive host port with the same low-port requirement. |
 
@@ -231,6 +231,10 @@ The defaults need `net.ipv4.ip_unprivileged_port_start=80`, which `meridian serv
 | `drain_timeout` | `Int32` | Optional, default `300` | `300` | Positive seconds to wait for in-flight requests on the removed upstream; timeout warns and force-stops it. |
 
 The `data_dir` default lives under the deploy user's home so that nothing in Meridian needs root on the host. Meridian also stores the root Caddyfile, per-service route fragments, Unix admin socket, and reload lock under `~/.config/containers/meridian-caddy/`.
+
+A systemd user socket unit opens HTTP over TCP and HTTPS over TCP/UDP.
+The ports must differ and be at most 65535. HTTP/3 requires inbound UDP;
+see [socket activation](/guide/proxy-socket-upgrade).
 
 Caddy obtains and renews certificates automatically when `servers.web.proxy.ssl: true`; `ssl: false` emits an explicit HTTP site address. For a service without an existing fragment, `meridian setup` installs a persistent 503 maintenance route until the first successful deploy; existing routes are preserved.
 

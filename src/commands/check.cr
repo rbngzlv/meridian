@@ -31,8 +31,7 @@ rescue
   false
       end
 
-      # Must agree with what `upload_file_syncs` does: deploy reads the source, so
-      # a directory or a special file fails there even though it is "readable".
+      # Deploy reads the source; readable directories and special files fail.
       DEFAULT_LOCAL_FILE_PROBE = ->(path : String) { File.file?(path) && File::Info.readable?(path) }
 
       # Same primitive the transfer classes use, so the probe cannot disagree
@@ -112,9 +111,7 @@ rescue
         end
       end
 
-      # `tool:` rows above prove the *remote* side. Both transfer classes shell out
-      # locally too and only raise DependencyMissing once the deploy is underway,
-      # so the local side belongs in preflight as well.
+      # Transfers also need local tools; check before starting a deploy.
       private def check_local_transfer_tools : Array(ProbeResult)
         local_transfer_tools.map_with_index do |tool, index|
           position = 60 + index
@@ -130,8 +127,7 @@ rescue
         selected_roles(targets).map { |role| @config.servers[role]?.try(&.image) || @config.image }.uniq!.sort!
       end
 
-      # Local `files:` sources the selected roles would upload: a missing or unreadable
-      # source aborts the deploy on its first host, so it belongs in preflight.
+      # Unreadable sources would abort deploy on its first host.
       private def check_local_files(targets : Array(CLI::TargetSelector::Target)?) : Array(ProbeResult)
         selected_file_sources(targets).map_with_index do |source, index|
           position = 50 + index
@@ -231,7 +227,7 @@ rescue
             "caddy-version",
             31,
             ["sh", "-lc", caddy_version_check],
-            ">= 2.11.2"
+            ">= 2.11.6"
           )
           results << command_probe(
             host_context.host,
@@ -257,8 +253,7 @@ rescue
               proxy.healthcheck.probe_image
             )
           end
-          # Without this mount Caddy answers every asset request with 404 and the
-          # deploy reports success; it appears once `meridian setup` has re-run.
+          # Missing asset mounts cause 404s despite a successful deploy.
           if @config.assets
             results << command_probe(
               host_context.host,
@@ -272,8 +267,7 @@ rescue
 
         results << same_host_readiness(host_context.host, 40)
 
-        # One listing feeds both manifest checks: collisions and shared-accessory
-        # agreement read the same host-scoped state.
+        # Both manifest checks use the same host state.
         manifests =
           begin
             run_ssh(host_context.host, Runtime::ServiceManifest.list_command, batch_mode: true)
@@ -284,24 +278,19 @@ rescue
         results.concat(accessory_networks_probes(host_context.host))
         results.concat(shared_accessory_probes(host_context.host, manifests))
         results.concat(accessory_readiness_probes(host_context.host))
+        results << check_proxy_sockets(host_context.host, 39) if check_proxy?(host_context)
         # Runs last, renders at position 4 next to the ssh row.
         results << check_ssh_units(host_context.host, 4)
 
         results
       end
 
-      # Accessories the app depends on - those whose network it automatically
-      # joins - and therefore gated on before the app starts. Mirrors
-      # `Deploy::Orchestrator#co_network_accessories`, which selects on the
-      # network alone: `host:` is optional and does not narrow what a deploy
-      # waits for.
+      # Match deploy dependencies, including accessories without a host.
       private def co_network_accessories : Hash(String, Config::AccessoryConfig)
         @config.dependent_accessories
       end
 
-      # Resolving a readiness contract is pure and local - the same thing the
-      # deploy's pre-lock `validate_accessory_readiness!` does - so it covers
-      # every co-network accessory, including those no single host would probe.
+      # Resolve every dependency locally, even if it has no host to probe.
       private def check_accessory_readiness_resolution : Array(ProbeResult)
         accessories = co_network_accessories
         accessories.keys.sort!.map_with_index do |name, index|
@@ -341,9 +330,7 @@ rescue
         fail(host, "network:#{network}", position, ex.message || "network check failed")
       end
 
-      # Whether other services on this host agree with our definition of each
-      # accessory pinned here. Same fingerprint means one shared resource; a
-      # different one means somebody would be overwriting somebody else.
+      # Different definitions would overwrite another service's accessory.
       private def shared_accessory_probes(host : String, result : SSH::Result) : Array(ProbeResult)
         accessories = (@config.accessories || EMPTY_ACCESSORIES).select { |_, accessory| accessory.host == host }
         return [] of ProbeResult if accessories.empty?
@@ -375,8 +362,6 @@ rescue
         [fail(host, "accessory", 60, ex.message || "accessory check failed")]
       end
 
-      # The live probe stays host-scoped: unlike resolution, it needs somewhere
-      # to run.
       private def accessory_readiness_probes(host : String) : Array(ProbeResult)
         accessories = co_network_accessories.select { |_, accessory| accessory.host == host }
         names = accessories.keys.sort!
@@ -441,10 +426,7 @@ rescue
 
       SSH_UNITS = %w[ssh.socket ssh.service sshd.socket sshd.service]
 
-      # SSH is the only control plane, so a working connection is not enough: it
-      # must come from a live systemd unit. An orphaned sshd still holding :22
-      # after its unit stopped serves connections until it doesn't, and nothing
-      # recovers from that state on its own.
+      # An orphaned sshd can accept connections but will not recover on failure.
       private def check_ssh_units(host : String, position : Int32) : ProbeResult
         result = run_ssh(host, ["sh", "-lc", ssh_units_check], batch_mode: true)
         states = result.stdout.lines.map(&.strip).reject(&.empty?)
@@ -473,6 +455,43 @@ rescue
         result.stdout.strip == "true" ? pass(host, "caddy", position, "running") : fail(host, "caddy", position, "not running")
       rescue ex : SSH::ConnectionError
         fail(host, "caddy", position, ex.message || "Caddy check failed")
+      end
+
+      private def check_proxy_sockets(host : String, position : Int32) : ProbeResult
+        proxy = @config.resolved_proxy
+        command = <<-SH
+          set -eu
+          command -v ss >/dev/null
+          start=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)
+          [ #{proxy.http_port} -ge "$start" ] && [ #{proxy.https_port} -ge "$start" ] || { echo "unprivileged port threshold $start exceeds proxy ports"; exit 1; }
+          systemctl --user is-active --quiet meridian-caddy.socket
+          bindings=$(systemctl --user show meridian-caddy.socket --property=Listen --value)
+          for binding in ":#{proxy.http_port} (Stream)" ":#{proxy.https_port} (Stream)" ":#{proxy.https_port} (Datagram)"; do
+            case "$bindings" in *"$binding"*) ;; *) echo "socket unit missing $binding"; exit 1;; esac
+          done
+          pid=$(podman inspect --format '{{.State.Pid}}' meridian-caddy)
+          case "$pid" in ''|0|*[!0-9]*) echo "missing Caddy process"; exit 1;; esac
+          # Caddy's inherited FDs are visible even when systemd's are hidden.
+          check_listener() {
+            listeners=$(ss -H "$1" "sport = :$2")
+            case "$listeners" in
+              *rootlessport*) echo "rootlessport on $4 $2 loses client IPs"; exit 1;;
+            esac
+            case "$listeners" in
+              *"pid=$pid,fd=$3)"*) ;;
+              *) echo "$4 $2: missing Caddy activation FD $3 or process visibility"; exit 1;;
+            esac
+          }
+          check_listener -lntp #{proxy.http_port} 3 TCP
+          check_listener -lntp #{proxy.https_port} 4 TCP
+          check_listener -lnup #{proxy.https_port} 5 UDP
+          SH
+        result = run_ssh(host, ["sh", "-lc", command], batch_mode: true)
+        return pass(host, "caddy-sockets", position, "systemd TCP #{proxy.http_port}/#{proxy.https_port}, UDP #{proxy.https_port}") if result.exit_code.zero?
+
+        fail(host, "caddy-sockets", position, "#{failure_detail(result)}; run meridian setup after correcting proxy prerequisites")
+      rescue ex : SSH::ConnectionError
+        fail(host, "caddy-sockets", position, ex.message || "socket check failed")
       end
 
       private def caddy_version_check : String
@@ -554,11 +573,7 @@ rescue
         ["zstd", "rsync", "skopeo"]
       end
 
-      # Mirrors the `ensure_local_dependency!` calls in Transfer::Stream and
-      # Transfer::Incremental. Deliberately not `transfer_tools`: that list is the
-      # remote requirement, which `server bootstrap` installs. Locally, incremental
-      # needs only rsync -- it exports through `podman save`, and skopeo runs on the
-      # host, not here.
+      # Match transfer classes: incremental uses rsync locally, skopeo remotely.
       private def local_transfer_tools : Array(String)
         mode = @config.transfer.try(&.mode)
         return [] of String if mode.nil? || mode.registry?

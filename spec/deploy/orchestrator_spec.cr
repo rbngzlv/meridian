@@ -452,7 +452,7 @@ def accessory_gate_config : String
             required_successes: 1
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
 
     accessories:
       cache:

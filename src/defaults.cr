@@ -1,8 +1,6 @@
 module Meridian
   module Defaults
-    # Default Caddy image. Pinned and docker.io-prefixed so `meridian init`
-    # and the generator fallback can never install two different proxy versions.
-    # Bump deliberately in its own change.
-    PROXY_IMAGE = "docker.io/library/caddy:2.11.4-alpine"
+    # Keep init and generator defaults on the same pinned Caddy image.
+    PROXY_IMAGE = "docker.io/library/caddy:2.11.7-alpine"
   end
 end

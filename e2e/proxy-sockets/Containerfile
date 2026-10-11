@@ -1,0 +1,7 @@
+FROM docker.io/library/caddy:2.11.7-builder-alpine AS builder
+WORKDIR /test
+COPY http3-client.go .
+RUN go mod init meridian-http3-test && go get github.com/quic-go/quic-go@v0.59.1 && go mod tidy && CGO_ENABLED=0 go build -o /http3-client .
+FROM scratch
+COPY --from=builder /http3-client /http3-client
+ENTRYPOINT ["/http3-client"]

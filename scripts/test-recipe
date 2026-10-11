@@ -66,11 +66,7 @@ case "$RECIPE" in
     ROLLBACK_LEG=0
     ;;
   marten-sqlite-incremental)
-    # Same fixture and service as marten-sqlite-assets, on its own throwaway VM,
-    # but transferred with `mode: incremental` so the two deploys can be compared
-    # byte-for-byte. The rollback leg's two tagged images are what make that
-    # comparison meaningful: release-b only invalidates the Containerfile's
-    # trailing RELEASE_MARKER layer, so everything heavier must be reused.
+    # Only RELEASE_MARKER changes between images; other layers must be reused.
     SERVICE="meridian-e2e"
     FIXTURE_NAME="marten-sqlite-assets"
     VM_SUFFIX="incremental"
@@ -147,10 +143,7 @@ require_command() {
 
 REQUIRED_COMMANDS=(crystal curl expect limactl nc podman ssh-keygen)
 
-# Transfer::Incremental shells out to rsync on the *local* side as well, and only
-# discovers it is missing at the first deploy -- ten minutes of VM boot, image
-# build, and bootstrap into a run. Fail up front instead. (skopeo is needed only
-# on the host, where `server bootstrap` installs it.)
+# Check local rsync before booting the VM; bootstrap installs skopeo remotely.
 if [[ "$TRANSFER_MODE" == "incremental" ]]; then
   REQUIRED_COMMANDS+=(rsync)
 fi
@@ -229,8 +222,7 @@ assert_release_marker() {
   fi
 }
 
-# Reads the byte count out of Transfer::Incremental's "[host] Transferred 31.4 MB
-# in 22.10s" line. Units come from `format_bytes` in src/transfer/helpers.cr.
+# Parse transfer totals using format_bytes units (src/transfer/helpers.cr).
 transferred_bytes() {
   awk '/\] Transferred /{
     for (i = 1; i <= NF; i++) if ($i == "Transferred") { value = $(i + 1); unit = $(i + 2); break }
@@ -244,10 +236,8 @@ transferred_bytes() {
   }' "$1"
 }
 
-# Removing the old colour's container right after the proxy switch can stall
-# the rootless Podman network for a few seconds (aardvark-dns re-syncs), so the
-# first request after a redeploy gets a bounded retry window before the strict
-# single-shot assertions run.
+# Wait for aardvark-dns to settle after removing the old container.
+# The assertions below then use single requests.
 wait_for_app_health() {
   for _ in $(seq 1 10); do
     if curl --fail --silent --max-time 15 \
@@ -435,6 +425,15 @@ run_logged deploy-first \
 
 FIRST_COLOR="$(ssh_deploy "cat ~/.local/state/meridian/services/$SERVICE/active-color")"
 
+if [[ "$RECIPE" == "go-static-binary" ]]; then
+  log_step "Verifying socket client IPs, HTTP/3 and ACME renewal"
+  podman build -t localhost/meridian-http3-test:latest "$ROOT_DIR/e2e/proxy-sockets"
+  podman save localhost/meridian-http3-test:latest | ssh_deploy podman load
+  ssh_deploy 'mkdir -p /tmp/meridian-socket-fixture'
+  tar -C "$ROOT_DIR/e2e/proxy-sockets" -cf - . | ssh_deploy 'tar -C /tmp/meridian-socket-fixture -xf -'
+  run_logged socket-protocols ssh_deploy "sh /tmp/meridian-socket-fixture/verify.sh /tmp/meridian-socket-fixture $SERVICE-$FIRST_COLOR:8080"
+fi
+
 log_step "Verifying application and fingerprinted asset"
 HOME_HTML="$(
   curl --fail --silent --show-error \
@@ -470,9 +469,7 @@ if [[ -n "$ASSET_HREF_PATTERN" ]]; then
   grep -q "meridian-e2e-marker" <<<"$ASSET_BODY"
 fi
 
-# Meridian-managed assets are served by the shared Caddy off its own read-only
-# mount. There is no per-service asset sidecar any more, so prove both that the
-# container is absent and that the bytes still arrive with the CDN headers.
+# Verify Caddy serves assets and headers without an asset sidecar.
 if [[ -n "$ASSET_HOST" ]]; then
   log_step "Verifying the shared proxy serves assets without a sidecar"
 
@@ -493,10 +490,7 @@ if [[ -n "$ASSET_HOST" ]]; then
     exit 74
   fi
 
-  # `Vary: Accept-Encoding`, not `Content-Encoding: gzip`: Caddy's `encode` skips
-  # bodies under its 512-byte minimum, and the fixture's CSS is well under that.
-  # Vary is emitted whenever the directive is installed, at any size, so it is the
-  # assertion that actually tracks `assets.compression`.
+  # The CSS is below Caddy's compression threshold; check Vary instead of gzip.
   ASSET_HEADERS="$(
     curl --fail --silent --show-error --dump-header - --output /dev/null \
       --header "Accept-Encoding: gzip" \
@@ -546,9 +540,7 @@ fi
 
 sleep 2
 
-# With retain_releases=2 two deploys alone leave exactly two directories, so the
-# count check below would pass even if pruning never ran. Seed a lexically
-# smallest stale release so the prune has something it must actually delete.
+# Seed an old release so the retention check fails if pruning never runs.
 if [[ -n "$ASSET_HOST" ]]; then
   STALE_ASSET_RELEASE="00000000000000"
   ssh_deploy "mkdir -p ~/.local/state/meridian/assets/$SERVICE/$STALE_ASSET_RELEASE"
@@ -614,11 +606,7 @@ fi
 log_step "Verifying health, persistence, and assets after redeploy"
 run_logged health-after-redeploy wait_for_app_health
 
-# The whole point of `transfer.mode: incremental`: the second deploy rsyncs an OCI
-# layout whose heavy blobs are already on the host, so only the changed top layer
-# crosses the wire. Blob filenames are content digests, so this only holds if
-# skopeo re-exports unchanged layers byte-for-byte -- which nothing but a real
-# transfer can prove.
+# A real transfer verifies that skopeo preserves unchanged layer digests.
 if [[ "$INCREMENTAL_CHECK" == "1" ]]; then
   log_step "Verifying the second transfer reused the unchanged layers"
 
@@ -662,9 +650,7 @@ if [[ -n "$ASSET_HREF_PATTERN" ]]; then
     "http://$ASSET_FETCH_HOST$ASSET_PATH" | grep -q "meridian-e2e-marker"
 fi
 
-# The `:U` builder mount leaves release directories owned by a mapped subuid, so
-# pruning only works from inside the user namespace. Nothing but a real deploy
-# exercises that, which is why this lives here and not in a spec.
+# :U leaves files owned by a mapped UID; pruning needs podman unshare.
 if [[ -n "$ASSET_HOST" ]]; then
   log_step "Verifying asset release rotation and pruning"
 

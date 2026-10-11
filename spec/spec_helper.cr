@@ -530,7 +530,7 @@ MINIMAL_CONFIG = <<-YAML
           - 192.168.1.10
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
 
     registry:
       server: registry.example.com
@@ -566,7 +566,7 @@ FULL_CONFIG = <<-YAML
         cmd: bin/sidekiq
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
 
     env:
       clear:
@@ -623,7 +623,7 @@ FULL_CONFIG_WITH_KEYS = <<-YAML
           - 192.168.1.10
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
 
     registry:
       server: registry.example.com

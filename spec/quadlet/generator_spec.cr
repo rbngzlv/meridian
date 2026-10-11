@@ -301,8 +301,7 @@ describe "Meridian::Quadlet::Generator" do
       config = load_config(shared_network_config)
       output = Meridian::Quadlet::Generator.new(config).container_file(config.servers["web"], Meridian::Quadlet::Color::Green)
 
-      # `nextcloud.network` is a Quadlet unit Meridian generates; `postgres` is a
-      # pre-existing Podman network referenced by its bare name.
+      # Generated networks use .network; existing networks use bare names.
       output.should contain("Network=nextcloud.network")
       output.should contain("Network=postgres")
       output.should_not contain("Network=postgres.network")
@@ -476,7 +475,7 @@ describe "Meridian::Quadlet::Generator" do
             proxy:
               host: app.example.com
         proxy:
-          image: example.com/custom-caddy:2.11.4
+          image: example.com/custom-caddy:2.11.7
           http_port: 8080
           https_port: 8443
           data_dir: /srv/meridian-caddy
@@ -484,13 +483,15 @@ describe "Meridian::Quadlet::Generator" do
       output = Meridian::Quadlet::Generator.new(config).proxy_container_file
 
       output.should eq(<<-QUADLET)
+        [Unit]
+        Requires=meridian-caddy.socket
+        After=meridian-caddy.socket
+
         [Container]
-        Image=example.com/custom-caddy:2.11.4
+        Image=example.com/custom-caddy:2.11.7
         ContainerName=meridian-caddy
         AddCapability=NET_BIND_SERVICE
         Network=meridian-proxy.network
-        PublishPort=8080:80
-        PublishPort=8443:443
         Volume=/srv/meridian-caddy:/data
         Volume=%h/.config/containers/meridian-caddy:/config
         Volume=%h/.local/state/meridian/assets:/srv/assets:ro
@@ -498,6 +499,12 @@ describe "Meridian::Quadlet::Generator" do
 
         [Service]
         Restart=always
+        Sockets=meridian-caddy.socket
+        # Start helpers here so they cannot inherit public sockets.
+        ExecStartPre=-podman rm -f --ignore meridian-caddy-network-init
+        ExecStartPre=podman run -d --name meridian-caddy-network-init --network=meridian-proxy example.com/custom-caddy:2.11.7 sleep infinity
+        ExecStartPost=podman rm -f --ignore meridian-caddy-network-init
+        ExecStopPost=-podman rm -f --ignore meridian-caddy-network-init
 
         [Install]
         WantedBy=default.target
@@ -509,13 +516,15 @@ describe "Meridian::Quadlet::Generator" do
       output = build_quadlet_generator(proxied_config_without_root_proxy).proxy_container_file
 
       output.should eq(<<-QUADLET)
+        [Unit]
+        Requires=meridian-caddy.socket
+        After=meridian-caddy.socket
+
         [Container]
-        Image=docker.io/library/caddy:2.11.4-alpine
+        Image=docker.io/library/caddy:2.11.7-alpine
         ContainerName=meridian-caddy
         AddCapability=NET_BIND_SERVICE
         Network=meridian-proxy.network
-        PublishPort=80:80
-        PublishPort=443:443
         Volume=%h/.local/share/meridian-caddy:/data
         Volume=%h/.config/containers/meridian-caddy:/config
         Volume=%h/.local/state/meridian/assets:/srv/assets:ro
@@ -523,6 +532,12 @@ describe "Meridian::Quadlet::Generator" do
 
         [Service]
         Restart=always
+        Sockets=meridian-caddy.socket
+        # Start helpers here so they cannot inherit public sockets.
+        ExecStartPre=-podman rm -f --ignore meridian-caddy-network-init
+        ExecStartPre=podman run -d --name meridian-caddy-network-init --network=meridian-proxy docker.io/library/caddy:2.11.7-alpine sleep infinity
+        ExecStartPost=podman rm -f --ignore meridian-caddy-network-init
+        ExecStopPost=-podman rm -f --ignore meridian-caddy-network-init
 
         [Install]
         WantedBy=default.target
@@ -533,9 +548,15 @@ describe "Meridian::Quadlet::Generator" do
 
   describe "#proxy_caddyfile" do
     it "imports only completed route fragments through the private admin socket" do
-      build_quadlet_generator.proxy_caddyfile.should eq(
-        "{\n\tadmin unix//config/admin.sock\n}\n\nimport /config/routes/*.caddy\n"
-      )
+      output = build_quadlet_generator.proxy_caddyfile
+      output.should contain("admin unix//config/admin.sock")
+      output.should contain("auto_https disable_redirects")
+      output.should contain("default_bind fd/4 {\n\t\tprotocols h1 h2")
+      output.should contain("default_bind fdgram/5 {\n\t\tprotocols h3")
+      output.should contain("http:// {\n\tbind fd/3")
+      output.should contain("import /config/routes/*.caddy")
+      output.should contain("redir https://{host}{uri} 308")
+      output.should_not contain("*.pending")
     end
   end
 
@@ -582,6 +603,7 @@ describe "Meridian::Quadlet::Generator" do
 
       route.should eq(
         ":80/app, :80/app/* {\n" \
+        "\tbind fd/3 {\n\t\tprotocols h1\n\t}\n" \
         "\turi strip_prefix /app\n" \
         "\treverse_proxy myapp-green:3000 {\n" \
         "\t\tstream_close_delay 300s\n" \
@@ -603,7 +625,7 @@ describe "Meridian::Quadlet::Generator" do
       proxy = config.servers["web"].proxy || raise "Expected proxy"
 
       Meridian::Quadlet::Generator.new(config).proxy_maintenance_route(proxy).should eq(
-        "http://example.com {\n\trespond 503\n}\n"
+        "http://example.com {\n\tbind fd/3 {\n\t\tprotocols h1\n\t}\n\trespond 503\n}\n"
       )
     end
 
@@ -698,10 +720,12 @@ describe "Meridian::Quadlet::Generator" do
 
       Meridian::Quadlet::Generator.new(config).proxy_redirects_route(proxy).should eq(
         "http://www.example.com {\n" \
+        "\tbind fd/3 {\n\t\tprotocols h1\n\t}\n" \
         "\tredir http://example.com{uri} permanent\n" \
         "}\n" \
         "\n" \
         "http://old.example.com {\n" \
+        "\tbind fd/3 {\n\t\tprotocols h1\n\t}\n" \
         "\tredir http://example.com{uri} permanent\n" \
         "}\n"
       )
@@ -1016,7 +1040,7 @@ describe "Meridian::Quadlet::Generator" do
 
         proxy_path = File.join(path, "meridian-caddy.container")
         File.exists?(proxy_path).should be_true
-        File.read(proxy_path).should contain("Image=docker.io/library/caddy:2.11.4-alpine")
+        File.read(proxy_path).should contain("Image=docker.io/library/caddy:2.11.7-alpine")
       end
     end
 

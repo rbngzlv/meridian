@@ -50,6 +50,9 @@ describe "Meridian::Proxy::Manager" do
       caddyfiles = runner.invocations.select(&.remote_command.==("cat > .config/containers/meridian-caddy/Caddyfile"))
       caddyfiles.map(&.host).should eq(["192.168.1.10", "192.168.1.11"])
 
+      sockets = runner.invocations.select(&.remote_command.==("cat > .config/systemd/user/meridian-caddy.socket"))
+      sockets.map(&.host).should eq(["192.168.1.10", "192.168.1.11"])
+
       routes = runner.invocations.select(&.remote_command.==("cat > .config/containers/meridian-caddy/routes/myapp.caddy.pending"))
       routes.map(&.host).should eq(["192.168.1.10", "192.168.1.11"])
       initial_route = remote_commands_for(runner, "192.168.1.10").find do |command|
@@ -87,18 +90,36 @@ describe "Meridian::Proxy::Manager" do
       end.should be_true
     end
 
-    it "checks flock, Caddy 2.11.2+, the private admin API, and reachability" do
+    it "checks flock, Caddy 2.11.6+, the private admin API, and reachability" do
       runner = FakeSSHRunner.new
       build_proxy_manager(runner: runner).setup
       commands = remote_commands_for(runner, "192.168.1.10")
 
       commands.should contain("sh -lc 'command -v flock >/dev/null'")
-      commands.should contain("mkdir -p .config/containers/systemd .config/containers/meridian-caddy/routes .local/state/meridian/assets")
+      commands.any?(&.starts_with?("mkdir -p .config/containers/systemd .config/systemd/user .config/containers/meridian-caddy/routes .local/state/meridian/assets")).should be_true
       commands.any? { |command| command.includes?("mkdir -p -- \"$path\"") && command.ends_with?("meridian %h/.local/share/meridian-caddy") }.should be_true
-      commands.any? { |command| command.includes?("caddy version") && command.includes?("$3 >= 2") }.should be_true
+      commands.any? { |command| command.includes?("caddy version") && command.includes?("$3 >= 6") }.should be_true
       commands.should contain("curl --silent --show-error --fail --unix-socket .config/containers/meridian-caddy/admin.sock http://localhost/config/")
-      commands.should contain("systemctl --user restart meridian-caddy.service")
+      validate = commands.index(&.includes?("caddy validate")) || raise "Expected Caddyfile validation"
+      stop = commands.index("systemctl --user stop meridian-caddy.service") || raise "Expected proxy stop"
+      socket = commands.index("systemctl --user enable --now meridian-caddy.socket") || raise "Expected socket start"
+      start = commands.index("systemctl --user start meridian-caddy.service") || raise "Expected proxy start"
+      (validate < stop < socket < start).should be_true
       commands.any? { |command| command.includes?("curl --silent --show-error --retry 10") && command.ends_with?("--head http://127.0.0.1:80/") }.should be_true
+    end
+
+    it "rejects incompatible images and invalid configs before stopping Caddy" do
+      baseline = FakeSSHRunner.new
+      build_proxy_manager(runner: baseline).setup
+      ["caddy version", "caddy validate"].each do |probe|
+        index = baseline.invocations.index { |invocation| invocation.remote_command.try(&.includes?(probe)) } || raise "missing probe"
+        runner = FakeSSHRunner.new
+        runner.queued_results.concat(Array.new(index) { ssh_ok })
+        runner.queued_results << ssh_fail(1, stderr: "probe failed")
+
+        expect_raises(Meridian::Proxy::SetupFailed) { build_proxy_manager(runner: runner).setup }
+        remote_commands_for(runner).should_not contain("systemctl --user stop meridian-caddy.service")
+      end
     end
 
     it "uses custom data and HTTP settings for setup" do
@@ -396,7 +417,8 @@ describe "Meridian::Proxy::Manager" do
       commands.find(&.includes?("caddy reload")).should_not be_nil
       commands.should contain("rm -f .local/state/meridian/services/myapp/manifest.json")
       commands.should contain("systemctl --user stop meridian-caddy.service")
-      commands.should contain("rm -f .config/containers/systemd/meridian-caddy.container")
+      commands.should contain("systemctl --user disable --now meridian-caddy.socket")
+      commands.should contain("rm -f .config/containers/systemd/meridian-caddy.container .config/systemd/user/meridian-caddy.socket")
       commands.none?(&.includes?(".local/share/meridian-caddy")).should be_true
       commands.none?(&.includes?("meridian-proxy.network")).should be_true
     end
@@ -504,6 +526,33 @@ describe "Meridian::Proxy::Manager" do
       commands = remote_commands_for(runner)
       commands.should_not contain("systemctl --user stop meridian-caddy.service")
       commands.should_not contain("rm -f .config/containers/systemd/meridian-caddy.container")
+    end
+  end
+end
+
+describe "Caddy version checks" do
+  it "accepts supported versions and rejects old versions or command failures" do
+    with_tempdir do |dir|
+      shim = <<-'SH'
+        #!/bin/sh
+        printf '%s\n' "$CADDY_VERSION"
+        exit "$VERSION_EXIT"
+        SH
+      %w[caddy podman].each do |name|
+        path = File.join(dir, name)
+        File.write(path, shim)
+        File.chmod(path, 0o755)
+      end
+      [Meridian::Proxy::Manager::IMAGE_CHECK, Meridian::Proxy::Manager::VERSION_CHECK].each do |command|
+        {"v2.10.99" => false, "v2.11.5" => false, "v2.11.6" => true,
+         "v2.11.7" => true, "v2.12.0" => true, "v3.0.0" => true, "" => false}.each do |version, supported|
+          [0, 1].each do |exit_code|
+            status = Process.run("sh", ["-c", command],
+              env: {"PATH" => "#{dir}:#{ENV["PATH"]}", "CADDY_VERSION" => version, "VERSION_EXIT" => exit_code.to_s})
+            status.success?.should eq(supported && exit_code.zero?), "#{version} exit #{exit_code}"
+          end
+        end
+      end
     end
   end
 end

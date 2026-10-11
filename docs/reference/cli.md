@@ -96,14 +96,23 @@ if low ports stay blocked afterwards.
 Installs or refreshes the shared host-level proxy and the networks it needs. Run it
 once per service, before the first deploy; it is safe to re-run.
 
+Re-running setup briefly interrupts every service sharing Caddy. Existing hosts
+need the [socket activation upgrade](/guide/proxy-socket-upgrade).
+
 ```bash
 meridian setup
 meridian setup --config config/production.yml
 ```
 
-Uploads and starts `<service>.network` on configured service hosts and on
-service-networked accessory hosts, uploads `meridian-proxy.network` and
-`meridian-caddy.container`, the root Caddyfile, and `meridian-proxy.network` to web hosts; creates `proxy.data_dir`; gives a service without an existing route an initial persistent HTTP 503 route; reloads user systemd; and restarts Caddy. Setup requires `flock`, verifies Caddy 2.11.2 or newer, its private Unix admin API, and HTTP reachability. Existing service routes are preserved and no per-service release state is written.
+Setup:
+
+- Starts `<service>.network` on service hosts and service-networked accessory hosts.
+- Installs the shared proxy network, Caddy Quadlet, socket unit and Caddyfile on web hosts.
+- Creates `proxy.data_dir` and a 503 route for services without an existing route.
+- Validates the Caddyfile, reloads user systemd and restarts Caddy.
+- Verifies Caddy 2.11.6+, its private admin API and HTTP reachability.
+
+Requires `flock`. Preserves existing routes and writes no per-service release state.
 
 See [`proxy`](/reference/deploy-yml#proxy) and
 [`servers.<role>.proxy`](/reference/deploy-yml#servers-role-proxy). Failures usually land
@@ -149,7 +158,9 @@ The command asks before removing anything. `--force` skips the prompt.
 
 ## `check` {#check}
 
-Runs read-only preflight probes against the selected hosts. Changes nothing.
+Runs read-only preflight probes against the selected hosts. Proxy probes verify
+the socket unit, Caddy's inherited TCP/UDP listeners, low-port permission and
+Caddy 2.11.6+. Listeners held by `rootlessport` fail the check.
 
 ```bash
 meridian check
@@ -375,6 +386,9 @@ meridian quadlet --color blue --output-dir ./tmp/quadlets
 | `--output-dir DIR` | `./quadlet-preview` | Directory for generated preview files. |
 
 Compare the output against [what is a Quadlet](/guide/concepts#what-is-a-quadlet).
+
+Install the exported `meridian-caddy.socket` in `~/.config/systemd/user`;
+it is a native systemd unit.
 
 See [`servers.<role>`](/reference/deploy-yml#servers-role),
 [`volumes`](/reference/deploy-yml#volumes), [`ports`](/reference/deploy-yml#ports),

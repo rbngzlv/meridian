@@ -44,9 +44,7 @@ module Meridian
         ).to_s
       end
 
-      # Service units of the accessories this app depends on - those whose
-      # network it automatically joins - so the app Quadlet can declare a
-      # systemd dependency (Wants=/After=) on them.
+      # Start networked accessories before the app.
       private def co_network_accessory_units : Array(String)
         @config.dependent_accessories.keys.sort!.map { |name| "#{name}.service" }
       end
@@ -64,16 +62,18 @@ module Meridian
         image = proxy.image || Defaults::PROXY_IMAGE
 
         ProxyContainerTemplate.new(
-          service: @config.service,
           image: image,
-          http_port: proxy.http_port,
-          https_port: proxy.https_port,
           data_dir: proxy.data_dir
         ).to_s
       end
 
       def proxy_caddyfile : String
-        "{\n\tadmin unix//config/admin.sock\n}\n\nimport /config/routes/*.caddy\n"
+        ProxyCaddyfileTemplate.new.to_s
+      end
+
+      def proxy_socket_file : String
+        proxy = @config.resolved_proxy
+        ProxySocketTemplate.new(proxy.http_port, proxy.https_port).to_s
       end
 
       def proxy_route(proxy : Config::ServerProxyConfig, target : String) : String
@@ -119,6 +119,7 @@ module Meridian
 
         String.build do |io|
           io << addresses << " {\n"
+          io << "\tbind fd/3 {\n\t\tprotocols h1\n\t}\n" unless ssl && host
           io << "\turi strip_prefix " << normalized_path << "\n" unless normalized_path == "/"
           handler.each_line { |line| io << '\t' << line << '\n' }
           io << "}\n"
@@ -149,11 +150,8 @@ module Meridian
         ).to_s
       end
 
-      # The `:U` mount option makes Podman chown the bind source to the builder's
-      # mapped UID - the same thing a named volume got for free - so an app image
-      # running as non-root can write. It re-chowns on every start, which is fine
-      # for asset bundles. It also means only the user namespace can prune old
-      # releases; see Orchestrator#run_asset_build_on_host.
+      # :U lets non-root builders write; pruning must use podman unshare.
+      # See Orchestrator#run_asset_build_on_host.
       def assets_builder_file(release_id : String) : String
         assets = @config.assets || raise ArgumentError.new("Missing assets configuration")
         environment = @config.env.try(&.clear) || EMPTY_ENV
@@ -202,10 +200,8 @@ module Meridian
 
         if proxied_service?
           File.write(File.join(output_dir, Runtime::Paths::SHARED_PROXY_NETWORK_FILE), proxy_network_file)
-        end
-
-        if proxied_service?
           File.write(File.join(output_dir, "meridian-caddy.container"), proxy_container_file)
+          File.write(File.join(output_dir, "meridian-caddy.socket"), proxy_socket_file)
           caddy_dir = File.join(output_dir, "caddy")
           Dir.mkdir_p(File.join(caddy_dir, "routes"))
           File.write(File.join(caddy_dir, "Caddyfile"), proxy_caddyfile)
@@ -270,15 +266,23 @@ module Meridian
 
       private class ProxyContainerTemplate
         def initialize(
-          @service : String,
           @image : String,
-          @http_port : Int32,
-          @https_port : Int32,
           @data_dir : String,
         )
         end
 
         ECR.def_to_s "src/quadlet/templates/proxy_container_file.ecr"
+      end
+
+      private class ProxySocketTemplate
+        def initialize(@http_port : Int32, @https_port : Int32)
+        end
+
+        ECR.def_to_s "src/quadlet/templates/proxy_socket_file.ecr"
+      end
+
+      private class ProxyCaddyfileTemplate
+        ECR.def_to_s "src/quadlet/templates/proxy_caddyfile.ecr"
       end
 
       private class AccessoryContainerTemplate

@@ -256,12 +256,16 @@ module Meridian
       )
         raise ValidationError.new("proxy.http_port must be positive") if @http_port < 1
         raise ValidationError.new("proxy.https_port must be positive") if @https_port < 1
+        raise ValidationError.new("proxy ports must be at most 65535") if @http_port > 65535 || @https_port > 65535
+        raise ValidationError.new("proxy.http_port and proxy.https_port must differ") if @http_port == @https_port
         raise ValidationError.new("proxy.drain_timeout must be positive") if @drain_timeout < 1
       end
 
       protected def after_initialize
         raise ValidationError.new("proxy.http_port must be positive") if http_port < 1
         raise ValidationError.new("proxy.https_port must be positive") if https_port < 1
+        raise ValidationError.new("proxy ports must be at most 65535") if http_port > 65535 || https_port > 65535
+        raise ValidationError.new("proxy.http_port and proxy.https_port must differ") if http_port == https_port
         raise ValidationError.new("proxy.drain_timeout must be positive") if drain_timeout < 1
       end
     end

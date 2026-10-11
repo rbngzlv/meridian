@@ -46,6 +46,10 @@ func main() {
 		_, _ = fmt.Fprint(w, hostname)
 	})
 
+	http.HandleFunc("/client-ip", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, r.Header.Get("X-Forwarded-For"))
+	})
+
 	http.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
 		seconds, err := strconv.Atoi(r.URL.Query().Get("seconds"))
 		if err != nil || seconds < 1 || seconds > 120 {

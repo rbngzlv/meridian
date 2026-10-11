@@ -18,7 +18,7 @@ def check_config : String
         cmd: bin/sidekiq
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
 
     transfer:
       mode: stream
@@ -103,6 +103,101 @@ def check_ssh_fail(exit_code : Int32 = 1, stdout : String = "", stderr : String 
   Meridian::SSH::Result.new(exit_code: exit_code, stdout: stdout, stderr: stderr)
 end
 
+class SocketCheckRunner < FakeSSHRunner
+  property socket_result : Meridian::SSH::Result = ssh_ok
+
+  def run(command : String, args : Array(String), input : String? = nil) : Meridian::SSH::Result
+    result = super
+    args.last.includes?("check_listener -lntp") ? @socket_result : result
+  end
+end
+
+describe "Caddy socket preflight" do
+  it "checks socket bindings, inherited FDs and low-port permission" do
+    runner = SocketCheckRunner.new
+    output = IO::Memory.new
+    build_check_command(runner: runner, output: output).run
+    command = remote_commands_for(runner).find(&.includes?("check_listener -lntp")) || raise "missing socket probe"
+    command.should contain("check_listener -lntp 80 3 TCP")
+    command.should contain("check_listener -lntp 443 4 TCP")
+    command.should contain("check_listener -lnup 443 5 UDP")
+    command.should contain("ip_unprivileged_port_start")
+    command.should contain("systemctl --user is-active --quiet meridian-caddy.socket")
+    output.to_s.should contain("systemd TCP 80/443, UDP 443")
+  end
+
+  it "reports socket failures with setup advice" do
+    ["rootlessport on TCP 80 loses client IPs", "UDP 443: missing Caddy activation FD 5", "ss: not found", "unprivileged port threshold 1024 exceeds proxy ports"].each do |detail|
+      runner = SocketCheckRunner.new
+      runner.socket_result = ssh_fail(1, stderr: detail)
+      output = IO::Memory.new
+      build_check_command(runner: runner, output: output).run.should be_false
+      line = output.to_s.lines.find(&.includes?("caddy-sockets")) || raise "missing result"
+      line.should contain("fail")
+      line.should contain(detail)
+      line.should contain("meridian setup")
+    end
+  end
+
+  it "checks inherited listeners when systemd process details are hidden" do
+    with_tempdir do |dir|
+      shim = <<-'SH'
+        #!/bin/sh
+        case "${0##*/}" in
+          cat) echo 80;;
+          systemctl)
+            case "$*" in
+              *is-active*) [ "$SCENARIO" != inactive ];;
+              *show*)
+                echo "[::]:$HTTP_PORT (Stream)"
+                echo "[::]:$HTTPS_PORT (Stream)"
+                [ "$SCENARIO" = wrong-unit ] || echo "[::]:$HTTPS_PORT (Datagram)";;
+            esac;;
+          podman)
+            case "$SCENARIO" in
+              zero-pid) echo 0;;
+              empty-pid) :;;
+              invalid-pid) echo invalid;;
+              *) echo 123;;
+            esac;;
+          ss)
+            [ "$SCENARIO" != missing ] || exit 0
+            pid=123
+            [ "$SCENARIO" != unrelated ] || pid=999
+            name=caddy
+            [ "$SCENARIO" != forwarded ] || name=rootlessport
+            fd=3
+            case "$*" in *":$HTTPS_PORT"*) fd=4;; esac
+            case "$*" in *-lnup*) fd=5;; esac
+            [ "$SCENARIO" != wrong-fd ] || fd=8
+            [ "$SCENARIO" != missing-udp ] || [ "$fd" != 5 ] || exit 0
+            printf 'LISTEN *:* users:(("%s",pid=%s,fd=%s))\n' "$name" "$pid" "$fd";;
+        esac
+        SH
+      %w[cat systemctl podman ss].each do |name|
+        path = File.join(dir, name)
+        File.write(path, shim)
+        File.chmod(path, 0o755)
+      end
+      [{80, 443}, {8080, 8443}].each do |ports|
+        http_port, https_port = ports
+        config = check_config.sub("image: docker.io/library/caddy:2.11.7-alpine",
+          "image: docker.io/library/caddy:2.11.7-alpine\n  http_port: #{http_port}\n  https_port: #{https_port}")
+        runner = SocketCheckRunner.new
+        build_check_command(content: config, runner: runner).run
+        command = remote_commands_for(runner).find(&.includes?("check_listener -lntp")) || raise "missing socket probe"
+        %w[valid inactive wrong-unit missing unrelated forwarded wrong-fd missing-udp zero-pid empty-pid invalid-pid].each do |scenario|
+          output = IO::Memory.new
+          status = Process.run("sh", ["-c", command.sub("sh -lc", "sh -c")], output: output, error: output,
+            env: {"PATH" => "#{dir}:#{ENV["PATH"]}", "SCENARIO" => scenario,
+                  "HTTP_PORT" => http_port.to_s, "HTTPS_PORT" => https_port.to_s})
+          status.success?.should eq(scenario == "valid"), "#{ports} #{scenario}: #{output}"
+        end
+      end
+    end
+  end
+end
+
 describe "Meridian::Commands::Check" do
   describe "#run" do
     it "passes when every configured host satisfies the probes" do
@@ -170,7 +265,7 @@ describe "Meridian::Commands::Check" do
                 ssl: true
 
           proxy:
-            image: docker.io/library/caddy:2.11.4-alpine
+            image: docker.io/library/caddy:2.11.7-alpine
 
           transfer:
             mode: stream
@@ -348,7 +443,7 @@ describe "Meridian::Commands::Check" do
 
       commands = remote_commands_for(runner)
       commands.should contain(%(podman inspect --format '{{.State.Running}}' meridian-caddy))
-      commands.any? { |remote| remote.includes?("podman exec meridian-caddy caddy version") && remote.includes?("$3 >= 2") }.should be_true
+      commands.any? { |remote| remote.includes?("podman exec meridian-caddy caddy version") && remote.includes?("$3 >= 6") }.should be_true
       commands.should contain("curl --silent --show-error --fail --unix-socket .config/containers/meridian-caddy/admin.sock http://localhost/config/")
       commands.should contain("podman exec meridian-caddy caddy validate --config /config/Caddyfile --adapter caddyfile")
       commands.should contain("podman network exists meridian-proxy")
@@ -427,8 +522,7 @@ describe "Meridian::Commands::Check" do
       output.to_s.should contain("accessory-readiness:cache")
     end
 
-    # A deploy gates on every accessory sharing the service network regardless of
-    # `host:`, so resolution has to be reported even where no host probes it live.
+    # Deploy also waits for networked accessories without a host.
     it "reports unresolvable readiness for a co-network accessory pinned to no host" do
       runner = FakeSSHRunner.new
       output = IO::Memory.new
@@ -812,8 +906,7 @@ describe "Meridian::Commands::Check" do
 
       command.run.should be_true
 
-      # zstd and skopeo are remote-only requirements for incremental: the local
-      # export goes through `podman save` and the import runs skopeo on the host.
+      # Incremental uses podman save locally; zstd and skopeo run remotely.
       probed.should eq(["rsync"])
       output.to_s.should contain("local")
     end

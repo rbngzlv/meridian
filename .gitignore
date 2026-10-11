@@ -9,3 +9,7 @@ node_modules
 docs/.vitepress/cache
 docs/.vitepress/dist
 docs/.vitepress/.temp
+
+# Local audit notes
+docs/audits/
+docs/*-audit.md

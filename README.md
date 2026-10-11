@@ -51,6 +51,9 @@ meridian check                             # preflight: SSH, Podman, secrets, pr
 meridian deploy
 ```
 
+Caddy uses systemd sockets to preserve client IPs, including over HTTP/3.
+Existing hosts need a [breaking upgrade](docs/guide/proxy-socket-upgrade.md).
+
 `init` sniffs out Marten, Rails, Elixir, Go, and Node projects and seeds sensible defaults. Whatever it can't guess, it asks.
 
 `setup` gives a service without an existing route a persistent HTTP 503 maintenance route until its first deploy.
@@ -100,7 +103,7 @@ Read-only preflight, and the thing to put in CI ahead of `deploy`. Any failure e
 
 - SSH reachability, Podman version, lingering, and a writable Quadlet directory
 - Transfer tooling and Podman secrets on every host
-- Caddy 2.11.2+, its private admin API, active configuration, and the shared `meridian-proxy` network on web hosts
+- Caddy 2.11.6+, its private admin API, active configuration, and the shared `meridian-proxy` network on web hosts
 - Route and ownership collisions against other Meridian services on the same host; manifests record the writing Meridian version for diagnostics
 - Local `files:` sources are readable, and for `stream` and `incremental` transfers, that the images exist in *local* Podman storage
 - Transfer tooling on the machine you deploy from, not just on the hosts — `zstd` for `stream`, `rsync` for `incremental`
@@ -201,7 +204,7 @@ The [`deploy.yml` reference](https://meridian-deploy.dev/reference/deploy-yml) h
 | Image transfer | Registry (always)         | Registry, stream, or rsync     |
 | Logs           | `docker logs`             | `journalctl`                   |
 | Language       | Ruby                      | Crystal                        |
-| Proxy          | kamal-proxy               | Caddy 2.11.4                   |
+| Proxy          | kamal-proxy               | Caddy 2.11.7                   |
 
 If you're already happy on Kamal, stay on Kamal. The reason to look at Meridian is if Docker or the registry requirement is actively in your way.
 

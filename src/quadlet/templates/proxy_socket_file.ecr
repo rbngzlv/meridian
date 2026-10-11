@@ -1,0 +1,13 @@
+[Unit]
+Description=Meridian Caddy public listeners
+
+[Socket]
+ListenStream=<%= @http_port %>
+ListenStream=<%= @https_port %>
+ListenDatagram=<%= @https_port %>
+BindIPv6Only=both
+Accept=no
+Service=meridian-caddy.service
+
+[Install]
+WantedBy=sockets.target

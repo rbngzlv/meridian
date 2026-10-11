@@ -425,7 +425,7 @@ describe "Meridian::Config::Loader" do
     it "parses the proxy image" do
       config = Meridian::Config::Loader.load(write_config(MINIMAL_CONFIG))
       proxy = config.proxy || raise "Expected proxy config"
-      proxy.image.should eq("docker.io/library/caddy:2.11.4-alpine")
+      proxy.image.should eq("docker.io/library/caddy:2.11.7-alpine")
     end
 
     it "uses Caddy proxy defaults" do
@@ -458,6 +458,15 @@ describe "Meridian::Config::Loader" do
             YAML
         end
       end
+    end
+
+    it "rejects overlapping and out-of-range proxy socket ports" do
+      ["http_port: 65536", "https_port: 65536", "http_port: 443"].each do |ports|
+        expect_raises(Meridian::Config::ValidationError) do
+          load_config("service: app\nimage: example.com/app\nservers:\n  web:\n    hosts: [host]\nproxy:\n  #{ports}\n")
+        end
+      end
+      expect_raises(Meridian::Config::ValidationError) { Meridian::Config::ProxyConfig.new(http_port: 443) }
     end
 
     it "rejects a non-positive application proxy port" do
@@ -700,7 +709,7 @@ describe "Meridian::Config::Loader" do
               - 192.168.1.10
 
         proxy:
-          image: docker.io/library/caddy:2.11.4-alpine
+          image: docker.io/library/caddy:2.11.7-alpine
         YAML
 
       ex = expect_raises(Meridian::Config::ValidationError) do
@@ -720,7 +729,7 @@ describe "Meridian::Config::Loader" do
               - 192.168.1.10
 
         proxy:
-          image: docker.io/library/caddy:2.11.4-alpine
+          image: docker.io/library/caddy:2.11.7-alpine
         YAML
 
       ex = expect_raises(Meridian::Config::ValidationError) do
@@ -736,7 +745,7 @@ describe "Meridian::Config::Loader" do
         image: registry.example.com/myorg/myapp
 
         proxy:
-          image: docker.io/library/caddy:2.11.4-alpine
+          image: docker.io/library/caddy:2.11.7-alpine
         YAML
 
       ex = expect_raises(Meridian::Config::ValidationError) do

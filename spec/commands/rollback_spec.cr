@@ -21,7 +21,7 @@ def rollback_config : String
             retries: 10
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
     YAML
 end
 
@@ -45,7 +45,7 @@ def single_host_rollback_config : String
             retries: 10
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
     YAML
 end
 
@@ -70,7 +70,7 @@ def fast_health_rollback_config : String
             required_successes: 1
 
     proxy:
-      image: docker.io/library/caddy:2.11.4-alpine
+      image: docker.io/library/caddy:2.11.7-alpine
     YAML
 end
 
