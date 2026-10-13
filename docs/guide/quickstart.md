@@ -160,6 +160,14 @@ it:
 
 ```bash
 meridian secret gen SECRET_KEY_BASE
+meridian secret set DATABASE_URL
+```
+
+The value is hidden as you type.
+
+For scripts:
+
+```bash
 printf '%s' "$DATABASE_URL" | meridian secret set DATABASE_URL
 ```
 

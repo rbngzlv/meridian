@@ -10,6 +10,95 @@ def build_secret_command(
   Meridian::Commands::Secret.new(config, ssh_executor: executor, output: output, error: output)
 end
 
+class SecretSetPromptSpec < Meridian::CLI::Commands::SecretSet
+  protected def read_secret_value(ctx : Meridian::CLI::Context, name : String) : String
+    read_hidden_value(ctx.input, ctx.error, name)
+  end
+end
+
+describe "Meridian::CLI secret set" do
+  it "preserves piped multiline input and removes only its final newline" do
+    runner = FakeSSHRunner.new
+    result = run_cli(
+      ["secret", "set", "API_KEY", "--config", write_config(FULL_CONFIG)],
+      input: IO::Memory.new("first\nsecond\n"),
+      ssh_executor: Meridian::SSH::Executor.new(runner: runner)
+    )
+
+    result.exit_code.should eq(0)
+    generated_secret_values(runner).should eq(["first\nsecond", "first\nsecond"])
+    result.output.should_not contain("hidden")
+    result.output.should_not contain("first")
+  end
+
+  it "prefers --value over stdin, including an explicitly empty value" do
+    runner = FakeSSHRunner.new
+    result = run_cli(
+      ["secret", "set", "API_KEY", "--value", "", "--config", write_config(FULL_CONFIG)],
+      input: IO::Memory.new("ignored"),
+      ssh_executor: Meridian::SSH::Executor.new(runner: runner)
+    )
+
+    result.exit_code.should eq(0)
+    generated_secret_values(runner).should eq(["", ""])
+    result.output.should_not contain("hidden")
+  end
+
+  it "describes the hidden prompt in help without loading config" do
+    result = run_cli(["secret", "set", "--help"])
+    result.exit_code.should eq(0)
+    result.output.should contain("hidden terminal prompt")
+    result.output.should contain("piped stdin")
+  end
+
+  it "counts Unicode characters, edits with Backspace, and ignores navigation sequences" do
+    runner = FakeSSHRunner.new
+    output = IO::Memory.new
+    error = IO::Memory.new
+    ctx = Meridian::CLI::Context.new(
+      IO::Memory.new("\b\u007fséc\u007f\b🔑\e[D\eOH\u0001\r"), output, error,
+      Meridian::SSH::Executor.new(runner: runner),
+      Meridian::CLI::DEFAULT_ORCHESTRATOR_FACTORY,
+      Meridian::CLI::DEFAULT_PROXY_MANAGER_FACTORY
+    )
+
+    SecretSetPromptSpec.new.invoke(ctx, ["API_KEY", "--config", write_config(FULL_CONFIG)]).should eq(0)
+    generated_secret_values(runner).should eq(["s🔑", "s🔑"])
+    error.to_s.should contain("0 characters")
+    error.to_s.should contain("3 characters")
+    error.to_s.should contain("2 characters")
+    error.to_s.should_not contain("séc")
+    error.to_s.should_not contain("🔑")
+    output.to_s.should_not contain("hidden")
+  end
+
+  {"\n" => "must not be empty", "value\u0003" => "cancelled", "value\u0004" => "cancelled", "value" => "cancelled", "value\xff" => "valid UTF-8"}.each do |input, message|
+    it "rejects #{input.inspect} before any remote writes" do
+      runner = FakeSSHRunner.new
+      output = IO::Memory.new
+      ctx = Meridian::CLI::Context.new(
+        IO::Memory.new(input), output, output,
+        Meridian::SSH::Executor.new(runner: runner),
+        Meridian::CLI::DEFAULT_ORCHESTRATOR_FACTORY,
+        Meridian::CLI::DEFAULT_PROXY_MANAGER_FACTORY
+      )
+
+      SecretSetPromptSpec.new.invoke(ctx, ["API_KEY", "--config", write_config(FULL_CONFIG)]).should eq(1)
+      output.to_s.should contain(message)
+      output.to_s.should_not contain("value") unless message == "must not be empty"
+      runner.invocations.should be_empty
+    end
+  end
+
+  it "loads config before reading input" do
+    input = IO::Memory.new("do not read")
+    result = run_cli(["secret", "set", "API_KEY", "--config", "/missing-meridian-prompt-config.yml"], input: input)
+    result.exit_code.should eq(1)
+    input.pos.should eq(0)
+    result.output.should_not contain("hidden")
+  end
+end
+
 def secret_commands_for(runner : FakeSSHRunner, host : String) : Array(String)
   runner.invocations.compact_map do |invocation|
     next unless invocation.host == host

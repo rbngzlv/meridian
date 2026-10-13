@@ -1,7 +1,7 @@
 # CLI
 
-Every command in the current Meridian CLI. Run `meridian COMMAND --help` for the
-authoritative flag list.
+Commands, flags, and examples for Meridian. Run `meridian COMMAND --help` for
+command-specific help.
 
 ## Common Flags
 
@@ -12,15 +12,13 @@ Every config-backed command accepts these, so they are not repeated per command:
 | `--config PATH` | `.meridian/deploy.yml` | Config file to load. |
 | `-h`, `--help` | n/a | Print help and exit. |
 
-`init` takes no `--config` — it is what writes the config in the first place.
+`init` always writes `.meridian/deploy.yml` and does not accept `--config`.
 
 ## Exit Codes
 
-`0` means the command completed, anything else means it failed. Validation errors,
-SSH failures, preflight probe failures, missing secrets, healthcheck timeouts, and
-deploy-lock contention all return non-zero. Two groups deviate and say so in their
-own section: `check` returns `1` specifically when a probe fails, and the streaming
-commands pass the remote exit code through.
+`0` means success; non-zero means failure. CLI argument and configuration errors
+return `1`. `exec`, `run`, `logs`, and `accessory logs` pass through the remote
+command's exit code.
 
 ## Target Selectors
 
@@ -80,12 +78,10 @@ needs; creates the deploy user; installs your SSH key; writes `/etc/subuid` and
 `/etc/subgid` entries; enables lingering; and configures low-port binding. It writes no
 service runtime state.
 
-Bootstrap deliberately leaves server policy to you. It installs no firewall, changes no
-sshd setting, grants no sudo rights, and enables no unattended upgrades — those are
-yours to decide, and Meridian has no business overriding them on a machine it does not
-own. If you want a firewall, the proxy needs inbound 80/443 and Meridian needs inbound
-SSH; note that any accessory publishing a host port needs its own rule too. Root login
-and password authentication stay exactly as you left them.
+Configure firewall rules, SSH hardening, sudo access, and unattended upgrades
+yourself. Bootstrap leaves these settings unchanged. If you enable a firewall,
+allow inbound SSH, ports 80/443 for the proxy, and any host ports published by
+accessories.
 
 See [`ssh`](/reference/deploy-yml#ssh), [`transfer`](/reference/deploy-yml#transfer),
 and [Caddy bind permission denied](/guide/troubleshooting#caddy-bind-permission-denied-on-port-80)
@@ -175,20 +171,12 @@ local image availability for registry-free transfer, readability of every local
 `files:` source, Caddy container/version/admin API/configuration, the shared proxy network, accessory readiness, and
 same-host manifest collisions.
 
-Transfer tooling is probed on both ends because both ends run it: `stream` pipes
-through a local `zstd`, and `incremental` shells out to a local `rsync`
-before anything is sent (its export uses `podman save`, and its `skopeo` import runs on the host). A `tool:` row on a host address is the remote side; one on
-`local` is your own machine. (`zstd` appears only on the host rows for `incremental` —
-`server bootstrap` installs it there, but the local incremental path never runs it.)
+A `local` row checks your machine or configuration; a host-address row checks the
+remote host. Required transfer tools depend on `transfer.mode`. Each `files:`
+source must be a readable regular file. Service-networked accessories have a local
+configuration check; accessories on selected hosts also have a live readiness check.
 
-Two probes have detail worth knowing. A local `files:` source must be a readable
-regular file — the same thing the deploy reads — so a directory is reported as a
-failure. Accessory readiness is reported twice: every accessory sharing the service
-network gets a `local` row proving its readiness contract resolves, and accessories
-pinned to a checked host additionally get a live probe against that host.
-
-Exit code `1` means at least one probe failed. Parse and config errors return other
-non-zero codes.
+Returns `1` if any probe fails or the arguments or configuration are invalid.
 
 See [`transfer`](/reference/deploy-yml#transfer), [`env`](/reference/deploy-yml#env),
 [`proxy`](/reference/deploy-yml#proxy),
@@ -215,8 +203,7 @@ verifies the service network, runs remote hooks, transfers images, uploads app
 Quadlets/files/asset units, and starts new units. Proxied managed
 roles then atomically reload their Caddy route, wait for the removed upstream to drain, and write `active-color` plus `release-state.json`;
 other managed roles restart their stable `<service>-<role>` unit without proxy state.
-Finally writes `manifest.json`, appends audit entries, and releases the lock in an
-`ensure` block.
+Finally writes `manifest.json`, appends audit entries, and releases the lock.
 
 With `strategy: recreate`, Meridian first transfers every role image and uploads
 all new Quadlets on the service's single host. On a redeploy it atomically installs a persistent Caddy 503 route, drains the old upstream, stops active secondary roles, and stops the old web colour
@@ -230,7 +217,7 @@ blocked and Meridian does not restart the old image. Repair the service before
 redeploying. Failures after the final switch do not restore maintenance; inspect
 Caddy when the switch result is uncertain, even if the error mentions maintenance.
 
-Lock contention is reported as a normal failed deploy, not a separate numeric code.
+Deploy fails if another operation holds the deploy lock.
 
 See [`servers.<role>`](/reference/deploy-yml#servers-role),
 [`boot`](/reference/deploy-yml#boot), [`transfer`](/reference/deploy-yml#transfer),
@@ -318,8 +305,8 @@ Accepts the [target selectors](#target-selectors).
 Proxied roles select both colour units, non-proxied managed roles select
 `<service>-<role>.service`, unmanaged roles select their configured units.
 
-Follow-only: there is no `--lines` and no `--no-follow`. For a historical slice, SSH
-in directly — [healthcheck timeout](/guide/troubleshooting#healthcheck-timeout) shows
+Logs always follow new entries. To view historical logs, connect over SSH —
+[healthcheck timeout](/guide/troubleshooting#healthcheck-timeout) shows
 the `journalctl` invocation. Returns the remote `journalctl` exit code.
 
 See [`servers.<role>`](/reference/deploy-yml#servers-role).
@@ -327,6 +314,8 @@ See [`servers.<role>`](/reference/deploy-yml#servers-role).
 ## `exec` {#exec}
 
 Runs a command inside the *already running* container for one role.
+
+Place the container command and its arguments after `--`.
 
 ```bash
 meridian exec web -- bin/rails db:migrate:status
@@ -348,8 +337,9 @@ See [`servers.<role>`](/reference/deploy-yml#servers-role).
 
 ## `run` {#run}
 
-Runs a one-off command in a *fresh* container on the service network — the difference
-to [`exec`](#exec), which reuses the running one.
+Runs a one-off command in a fresh container on the service network.
+Use [`exec`](#exec) to run a command in an existing container. Place the container
+command and its arguments after `--`.
 
 ```bash
 meridian run web -- bin/rails db:migrate
@@ -409,17 +399,12 @@ Before touching the host it checks the service manifests there: if another
 service already declares this accessory with a different definition, it fails
 without modifying anything.
 
-Then, in order:
+Run [`setup`](#setup) first for accessories using the service network. Custom
+accessory networks are created automatically if missing.
 
-1. **Network.** An accessory on the app's own `<service>` network requires
-   [`setup`](#setup) to have materialized it. A custom accessory network such as
-   `network: postgres` is created here if it does not exist.
-2. **Unit.** An existing Quadlet that matches is reused. One that differs while
-   another service references the accessory is left alone and the command fails
-   — Meridian never overwrites a shared definition.
-3. **Start.** Uploads the Quadlet, reloads user systemd, starts
-   `<name>.service`, and appends an audit entry. App `active-color` and
-   `release-state.json` are untouched.
+Uploads or reuses the accessory's Quadlet, reloads user systemd, starts
+`<name>.service`, and appends an audit entry. A conflicting Quadlet shared by
+another service is never overwritten.
 
 See [`accessories`](/reference/deploy-yml#accessories),
 [sharing an accessory](/reference/deploy-yml#shared-accessories),
@@ -442,13 +427,9 @@ meridian accessory stop postgres --force
 | `--force` | off | Skip the confirmation when other services share this accessory. |
 
 When other services on that host declare the same accessory, the command lists
-them and asks for confirmation, defaulting to No. Declining changes nothing and
-exits `1`. A closed or piped stdin counts as No, so automation never blocks —
-pass `--force` for unattended runs. An accessory only this service uses stops
-without any extra output.
-
-`--force` means only "I understand this is shared". It never overwrites
-conflicting definitions, ignores missing requirements, or deletes data.
+them and asks for confirmation. Declining exits `1` without stopping the accessory.
+For unattended runs, pass `--force`; closed or piped stdin is treated as declining.
+Accessories used only by this service stop without confirmation.
 
 See [`accessories`](/reference/deploy-yml#accessories) and
 [sharing an accessory](/reference/deploy-yml#shared-accessories).
@@ -516,16 +497,22 @@ Creates or replaces a Podman secret with a value you supply. Unlike
 [`secret gen`](#secret-gen) it always replaces.
 
 ```bash
+meridian secret set DATABASE_URL
 printf '%s\n' "$DATABASE_URL" | meridian secret set DATABASE_URL
 meridian secret set API_TOKEN --value 's3cr3t' --role workers
 ```
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--value VALUE` | read from stdin | Secret value to store. |
+| `--value VALUE` | hidden prompt or piped stdin | Secret value to store. |
 | `--role ROLE` | `web` | Target role. |
 
-Prefer stdin over `--value` — a value passed as a flag ends up in your shell history.
+Without `--value`, you are prompted for the value, which is hidden as you type.
+
+Piped input is read until EOF, with its final newline removed; use it
+for multiline values or scripts. Explicit `--value` takes precedence over stdin.
+Prefer the hidden prompt or piped stdin over `--value` as a value passed as a flag
+ends up in your shell history.
 
 Removes any existing remote secret with the same name, then creates the replacement
 on every host in the role. Missing deploy-time secrets surface in [`check`](#check).
@@ -617,8 +604,9 @@ See [`service`](/reference/deploy-yml#service),
 
 ## `plan` {#plan}
 
-Prints the resolved deploy intent from local config only. No SSH, no registry calls,
-and secret values are never printed. Run it after every config edit.
+Shows the deployment settings resolved from your local configuration. Run it
+after editing the config to check the result. It makes no remote connections and
+never prints secret values.
 
 ```bash
 meridian plan

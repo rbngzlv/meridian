@@ -125,7 +125,7 @@ module Meridian
         def description : String
           String.build do |io|
             io.puts "Create or replace a Podman secret on every host in the target role."
-            io.print "When --value is omitted, the secret value is read from stdin."
+            io.print "Without --value: hidden terminal prompt with a character count, or piped stdin."
           end
         end
 
@@ -139,7 +139,7 @@ module Meridian
         end
 
         def configure(parser : OptionParser) : Nil
-          parser.on("--value VALUE", "Secret value (default: read from stdin)") { |v| @value = v }
+          parser.on("--value VALUE", "Secret value (default: prompt or stdin)") { |v| @value = v }
           parser.on("--role ROLE", "Target role (default: web)") { |v| @role = v }
           parser.on("--config PATH", "Path to deploy config (default: .meridian/deploy.yml)") { |v| @file = v }
         end
@@ -158,10 +158,59 @@ module Meridian
             return 1
           end
 
-          secret_value = @value || ctx.input.gets_to_end.chomp
           config = Config::Loader.load(@file)
+          secret_value = @value || read_secret_value(ctx, positionals.first)
           ::Meridian::Commands::Secret.new(config, ssh_executor: ctx.ssh_executor, output: ctx.output, error: ctx.error).set(positionals.first, secret_value, @role)
           0
+        end
+
+        protected def read_secret_value(ctx : Context, name : String) : String
+          input = ctx.input
+          return input.gets_to_end.chomp unless input.is_a?(IO::FileDescriptor) && input.tty?
+
+          begin
+            input.raw { read_hidden_value(input, ctx.error, name) }
+          rescue IO::Error
+            raise ArgumentError.new("Could not read hidden secret value")
+          ensure
+            ctx.error.puts
+            ctx.error.flush
+          end
+        end
+
+        protected def read_hidden_value(input : IO, error : IO, name : String) : String
+          chars = [] of Char
+          escape_state = 0
+          loop do
+            error.print "\rValue for #{name} (hidden): #{chars.size} characters\e[K"
+            error.flush
+            case char = input.read_char
+            when nil, '\u0003', '\u0004'
+              raise ArgumentError.new("Secret input cancelled")
+            end
+
+            if escape_state == 1
+              escape_state = char.in?('[', 'O') ? 2 : 0
+              next
+            elsif escape_state == 2
+              escape_state = 0 if char.in?('@'..'~')
+              next
+            end
+
+            case char
+            when '\r', '\n'
+              raise ArgumentError.new("Secret value must not be empty") if chars.empty?
+              return chars.join
+            when '\b', '\u007f'
+              chars.pop?
+            when '\e'
+              escape_state = 1
+            else
+              chars << char unless char.control?
+            end
+          end
+        rescue InvalidByteSequenceError
+          raise ArgumentError.new("Secret input must be valid UTF-8")
         end
       end
 
