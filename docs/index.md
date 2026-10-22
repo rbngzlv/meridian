@@ -311,8 +311,8 @@ function copyInstall() {
           </tr>
           <tr>
             <th scope="row">Zero-downtime</th>
-            <td class="own">kamal-proxy</td>
-            <td>Caddy</td>
+            <td class="own">Caddy</td>
+            <td>kamal-proxy</td>
             <td>nginx / Traefik</td>
           </tr>
           <tr>
